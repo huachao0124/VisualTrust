@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 from collections import defaultdict
 from pathlib import Path, PurePosixPath
+from urllib.parse import quote
 
 from PIL import Image
 
@@ -258,7 +259,7 @@ def render(spec, source, dataset_root, output, ffmpeg, subtitle_specs=None):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--specs", type=Path, required=True)
-    parser.add_argument("--id", required=True)
+    parser.add_argument("--id", help="Render one case; omit to render every case in --specs")
     parser.add_argument("--dataset-root", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
@@ -274,36 +275,57 @@ def main():
         if relative
     }
     with args.specs.open() as handle:
-        spec = next(
-            (r for line in handle if (r := json.loads(line))["id"] == args.id), None
-        )
-    if spec is None:
-        raise ValueError("Unknown case ID")
+        specs = [json.loads(line) for line in handle if line.strip()]
+    if args.id is not None:
+        specs = [spec for spec in specs if spec["id"] == args.id]
+    if not specs:
+        raise ValueError("Unknown case ID" if args.id is not None else "No cases in specs file")
+    ids = [spec["id"] for spec in specs]
+    if any(not isinstance(value, str) or value in {"", ".", ".."} for value in ids):
+        raise ValueError("Invalid case ID")
+    if len(set(ids)) != len(ids):
+        raise ValueError("Duplicate case IDs")
+    outputs = [args.output if args.id is not None else args.output / quote(value, safe="") for value in ids]
     if args.preview:
-        args.output.mkdir(parents=True, exist_ok=True)
-        for condition in ["C", "D"]:
-            for i, (_, _, image) in enumerate(cards(spec, condition)):
-                image.save(args.output / f"{condition}_{i}.png")
+        for spec, output in zip(specs, outputs):
+            output.mkdir(parents=True, exist_ok=True)
+            for condition in ["C", "D"]:
+                for i, (_, _, image) in enumerate(cards(spec, condition)):
+                    image.save(output / f"{condition}_{i}.png")
+                    image.close()
         return
     if args.dataset_root is None:
         parser.error("--dataset-root is required for video rendering")
     data_root = args.specs.resolve().parent
-    sources = json.loads((data_root / "sources.json").read_text())
-    source = next(s for s in sources if s["id"] == spec["source_id"])
-    path = dataset_path(args.dataset_root, source["path"])
-    if not path.is_file():
-        raise FileNotFoundError(source["path"])
+    sources = {s["id"]: s for s in json.loads((data_root / "sources.json").read_text())}
+    paths = []
+    for spec, output in zip(specs, outputs):
+        source = sources[spec["source_id"]]
+        path = dataset_path(args.dataset_root, source["path"])
+        if not path.is_file():
+            raise FileNotFoundError(source["path"])
+        if any((output / (condition + ".mp4")).exists()
+               for condition in ["no_claim", "accurate_claim", "misleading_claim"]):
+            raise FileExistsError(f"Output already exists: {output}")
+        paths.append(path)
+    if (args.output / "media.jsonl").exists():
+        raise FileExistsError("Output manifest already exists")
     shared = {
         s["source_id"]: s
         for s in json.loads((data_root / "subtitles.json").read_text())
     }
-    render(spec, path, args.dataset_root, args.output, args.ffmpeg, shared)
-    (args.output / "media.jsonl").write_text(
-        "".join(
-            json.dumps({"id": spec["id"], "condition": c, "path": c + ".mp4"}) + "\n"
-            for c in ["no_claim", "accurate_claim", "misleading_claim"]
-        )
-    )
+    args.output.mkdir(parents=True, exist_ok=True)
+    with (args.output / "media.jsonl").open("x") as manifest:
+        for index, (spec, path, output) in enumerate(zip(specs, paths, outputs), 1):
+            render(spec, path, args.dataset_root, output, args.ffmpeg, shared)
+            records = [
+                {"id": spec["id"], "condition": c,
+                 "path": (output / (c + ".mp4")).relative_to(args.output).as_posix()}
+                for c in ["no_claim", "accurate_claim", "misleading_claim"]
+            ]
+            manifest.write("".join(json.dumps(row) + "\n" for row in records))
+            manifest.flush()
+            print(f"[{index}/{len(specs)}] {spec['id']}", flush=True)
 
 
 if __name__ == "__main__":
