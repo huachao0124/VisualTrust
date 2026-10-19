@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.env.*
+local_fonts*.json
+model.json
+judge.json
+datasets/
+rendered/
+dear_output/
+responses.jsonl
+scores/
+*.ttf
+*.otf
+*.ttc
