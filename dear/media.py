@@ -5,6 +5,8 @@ import json
 import subprocess
 from pathlib import Path
 
+from dear.protocol import validate_exclusions
+
 
 def probe(path):
     return json.loads(
@@ -24,13 +26,11 @@ def probe(path):
     )
 
 
-class ExistingVideoBlinder:
+class VideoBlinder:
     def __init__(self, media):
         self.media = media
 
     def prepare(self, material, exclude):
-        from .reader import _selection
-
         source = copy.deepcopy(material["receipt"])
         flags = {
             "visual_withheld": False,
@@ -53,7 +53,7 @@ class ExistingVideoBlinder:
         ]
         if any(float(r) % 360 for r in rotations):
             raise ValueError("Unrotated video required")
-        tracks, audio = _selection(
+        tracks, audio = validate_exclusions(
             exclude, material["duration_s"], stream["width"], stream["height"]
         )
         directory = self.media.directory / f"blind_{self.media.sequence:04d}"

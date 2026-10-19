@@ -6,8 +6,15 @@ import math
 
 import numpy as np
 
-from dear.protocol import ToolExecutionError, write_new
-from dear.reader import TOOL, ExistingVideoBlinder, _number, _selection
+from dear.media import VideoBlinder
+from dear.protocol import (
+    ToolExecutionError,
+    fail,
+    finite_number,
+    validate_exclusions,
+    write_new,
+)
+from dear.reader import TOOL
 
 SELECTION_PROTOCOL = "explicit_media_selection"
 VISUAL_TOOL = copy.deepcopy(TOOL)
@@ -30,7 +37,7 @@ def normalize(exclude, duration):
     """Resolve executable coordinates only; preserve the caller's raw selection."""
     if not isinstance(exclude, list):
         raise ToolExecutionError("invalid_exclusions", "exclude must be a list.")
-    if not _number(duration) or duration <= 0:
+    if not finite_number(duration) or duration <= 0:
         raise ToolExecutionError(
             "invalid_duration", "A positive finite video duration is required."
         )
@@ -75,8 +82,8 @@ def normalize(exclude, duration):
                 )
             start, end = (item.get("start_s", 0), item.get("end_s", duration))
             if not (
-                _number(start)
-                and _number(end)
+                finite_number(start)
+                and finite_number(end)
                 and (0 <= start < duration)
                 and (start < end)
             ):
@@ -100,7 +107,7 @@ def normalize(exclude, duration):
     return (effective, adjustments)
 
 
-class ExplicitVideoBlinder(ExistingVideoBlinder):
+class ExplicitVideoBlinder(VideoBlinder):
 
     def prepare(self, material, exclude):
         receipt = {
@@ -211,10 +218,6 @@ def checked_exclusions(exclude, duration):
                 "Text uses displayed track_id. Manual coordinates require explicit non_text_visual intent.",
             )
     return result
-
-
-def fail(code, message, **details):
-    raise ToolExecutionError(code, message, **details)
 
 
 def query_scope(arguments, material_id, duration):
@@ -402,7 +405,7 @@ class OverlapCatalog:
             text.append({"track_id": self.aliases[ident]})
         effective, _ = normalize(manual, material["duration_s"])
         width, height = self.value["canvas"]
-        _selection(effective, material["duration_s"], width, height)
+        validate_exclusions(effective, material["duration_s"], width, height)
         observed = self.catalog.resolve(material, text)
         return (
             observed + self._boundary_masks([i["track_id"] for i in text]) + effective

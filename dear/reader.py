@@ -2,9 +2,8 @@
 
 import copy
 import json
-import math
 
-from dear.media import ExistingVideoBlinder
+from dear.media import VideoBlinder
 from dear.protocol import ANSWER, ToolExecutionError, answer_prompt, text_block
 
 TOOL = {
@@ -84,79 +83,13 @@ def reader_messages(qa, video_url, availability):
     ]
 
 
-def _number(value):
-    return type(value) in (int, float) and math.isfinite(value)
-
-
-def _selection(exclude, duration, width, height):
-    """Validate geometry, not source credibility, semantics or answer support."""
-    if not isinstance(exclude, list):
-        raise ToolExecutionError("invalid_exclusions", "exclude must be a list.")
-    tracks, audio = ([], False)
-    for item in exclude:
-        if not isinstance(item, dict) or "kind" not in item:
-            raise ToolExecutionError(
-                "invalid_exclusions", "Each exclusion needs a kind."
-            )
-        if item["kind"] == "audio":
-            if set(item) != {"kind"}:
-                raise ToolExecutionError(
-                    "unsupported_audio_interval",
-                    "This adapter removes the whole audio track only; no partial success.",
-                )
-            audio = True
-            continue
-        if item["kind"] != "visual" or set(item) - {"kind", "box", "start_s", "end_s"}:
-            raise ToolExecutionError(
-                "unsupported_exclusion",
-                "Use supported media coordinates, not an asserted answer or claim text.",
-            )
-        if ("start_s" in item) != ("end_s" in item):
-            raise ToolExecutionError(
-                "invalid_interval", "Supply both interval endpoints, or neither."
-            )
-        start, end = (item.get("start_s", 0), item.get("end_s", duration))
-        if not (_number(start) and _number(end) and (0 <= start < end <= duration)):
-            raise ToolExecutionError(
-                "invalid_interval",
-                "Interval must lie inside the selected video; no clamping.",
-            )
-        box = item.get("box", [0, 0, 1, 1])
-        if (
-            not isinstance(box, list)
-            or len(box) != 4
-            or (not all((_number(x) for x in box)))
-        ):
-            raise ToolExecutionError(
-                "invalid_box", "Use four finite normalized LTRB coordinates."
-            )
-        l, t, r, b = box
-        if not (0 <= l < r <= 1 and 0 <= t < b <= 1):
-            raise ToolExecutionError(
-                "invalid_box", "Rectangle must lie inside the selected video."
-            )
-        track = {
-            "start_s": start,
-            "end_s": end,
-            "box": [
-                math.floor(l * width),
-                math.floor(t * height),
-                math.ceil(r * width),
-                math.ceil(b * height),
-            ],
-        }
-        if track not in tracks:
-            tracks.append(track)
-    return (tracks, audio)
-
-
 class BlindAnswer:
     """Callable terminal tool. Original QA is host-bound, not model-supplied."""
 
     def __init__(self, workspace, *, ask, media, record, blinder=None):
         self.workspace, self.ask, self.media = (workspace, ask, media)
         self.record = record
-        self.blinder = blinder or ExistingVideoBlinder(media)
+        self.blinder = blinder or VideoBlinder(media)
         self.qa = copy.deepcopy({k: workspace.job[k] for k in ("question", "options")})
         self.finished = False
 

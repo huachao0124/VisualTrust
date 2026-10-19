@@ -2,7 +2,6 @@
 
 import copy
 import hashlib
-import json
 import math
 import unicodedata
 from collections import Counter
@@ -14,13 +13,7 @@ import cv2
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
-from dear.protocol import ToolExecutionError
-
-
-def digest(value):
-    return hashlib.sha256(
-        json.dumps(value, sort_keys=True, ensure_ascii=False).encode()
-    ).hexdigest()
+from dear.protocol import fail, signature
 
 
 def sha_file(path):
@@ -29,10 +22,6 @@ def sha_file(path):
         for block in iter(lambda: f.read(4 * 1024 * 1024), b""):
             h.update(block)
     return h.hexdigest()
-
-
-def fail(code, message):
-    raise ToolExecutionError(code, message)
 
 
 class Catalog:
@@ -464,7 +453,7 @@ def catalog_from_tracker(tracker, duration_s, material_id, source_sha256):
                 **segment,
                 text=text,
                 variants=variants,
-                track_id="text_" + digest(dict(binding=binding, segment=segment))[:24],
+                track_id="text_" + signature(dict(binding=binding, segment=segment))[:24],
             )
         )
     value = dict(
@@ -473,7 +462,7 @@ def catalog_from_tracker(tracker, duration_s, material_id, source_sha256):
         decoded_frames=tracker.frame_index + 1,
         coverage_certified=False,
     )
-    value["catalog_id"] = digest(value)
+    value["catalog_id"] = signature(value)
     return TrackedCatalog(value)
 
 
@@ -503,7 +492,7 @@ def scan_frames(
         tracker.update(rgb, time_s, detections)
     catalog = catalog_from_tracker(tracker, duration_s, material_id, source_sha256)
     catalog.value["ocr_times_s"] = ocr_times
-    catalog.value["catalog_id"] = digest(
+    catalog.value["catalog_id"] = signature(
         {k: v for k, v in catalog.value.items() if k != "catalog_id"}
     )
     return catalog

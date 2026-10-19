@@ -3,6 +3,7 @@
 import copy
 import hashlib
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -61,8 +62,8 @@ ANSWER = VIDEO_ANALYST_ROLE + "\n\n" + ANSWER_TASK
 SELECTOR_ROLE = "You are an evidence curator. Select what a separate reader should receive to answer the question, retaining relevant evidence and withholding material you judge misleading."
 
 
-def fail(code, message):
-    raise ToolExecutionError(code, message)
+def fail(code, message, **details):
+    raise ToolExecutionError(code, message, **details)
 
 
 def signature(value):
@@ -97,3 +98,69 @@ def action(message, meta, allowed):
     if not isinstance(arguments, dict):
         fail("invalid_arguments", "Tool arguments must be an object.")
     return (call, copy.deepcopy(arguments))
+
+
+def finite_number(value):
+    return type(value) in (int, float) and math.isfinite(value)
+
+
+def validate_exclusions(exclude, duration, width, height):
+    """Validate geometry, not source credibility, semantics or answer support."""
+    if not isinstance(exclude, list):
+        raise ToolExecutionError("invalid_exclusions", "exclude must be a list.")
+    tracks, audio = ([], False)
+    for item in exclude:
+        if not isinstance(item, dict) or "kind" not in item:
+            raise ToolExecutionError(
+                "invalid_exclusions", "Each exclusion needs a kind."
+            )
+        if item["kind"] == "audio":
+            if set(item) != {"kind"}:
+                raise ToolExecutionError(
+                    "unsupported_audio_interval",
+                    "This adapter removes the whole audio track only; no partial success.",
+                )
+            audio = True
+            continue
+        if item["kind"] != "visual" or set(item) - {"kind", "box", "start_s", "end_s"}:
+            raise ToolExecutionError(
+                "unsupported_exclusion",
+                "Use supported media coordinates, not an asserted answer or claim text.",
+            )
+        if ("start_s" in item) != ("end_s" in item):
+            raise ToolExecutionError(
+                "invalid_interval", "Supply both interval endpoints, or neither."
+            )
+        start, end = (item.get("start_s", 0), item.get("end_s", duration))
+        if not (finite_number(start) and finite_number(end) and (0 <= start < end <= duration)):
+            raise ToolExecutionError(
+                "invalid_interval",
+                "Interval must lie inside the selected video; no clamping.",
+            )
+        box = item.get("box", [0, 0, 1, 1])
+        if (
+            not isinstance(box, list)
+            or len(box) != 4
+            or (not all((finite_number(x) for x in box)))
+        ):
+            raise ToolExecutionError(
+                "invalid_box", "Use four finite normalized LTRB coordinates."
+            )
+        l, t, r, b = box
+        if not (0 <= l < r <= 1 and 0 <= t < b <= 1):
+            raise ToolExecutionError(
+                "invalid_box", "Rectangle must lie inside the selected video."
+            )
+        track = {
+            "start_s": start,
+            "end_s": end,
+            "box": [
+                math.floor(l * width),
+                math.floor(t * height),
+                math.ceil(r * width),
+                math.ceil(b * height),
+            ],
+        }
+        if track not in tracks:
+            tracks.append(track)
+    return (tracks, audio)
