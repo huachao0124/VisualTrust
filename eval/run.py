@@ -3,9 +3,11 @@
 import argparse
 import hashlib
 import json
+import sys
+from collections import Counter
 from pathlib import Path, PurePosixPath
 
-from .client import create_client, read_config
+from .client import configuration_identity, create_client, neutral_media, read_config
 
 CONDITIONS = ("no_claim", "accurate_claim", "misleading_claim")
 
@@ -23,7 +25,7 @@ def read_specs(directory):
     if not paths:
         raise ValueError("No specification files found")
     for path in paths:
-        for line in path.read_text().splitlines():
+        for line in path.read_text(encoding="utf-8").splitlines():
             row = json.loads(line)
             if row["id"] in result:
                 raise ValueError("Duplicate case ID")
@@ -52,19 +54,23 @@ def prompt(case):
 
 def run(args):
     cases = read_specs(args.specs)
-    media = [json.loads(line) for line in Path(args.media).read_text().splitlines()]
+    media = [
+        json.loads(line)
+        for line in Path(args.media).read_text(encoding="utf-8").splitlines()
+    ]
     seen = set()
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     if output.exists():
-        for line in output.read_text().splitlines():
+        for line in output.read_text(encoding="utf-8").splitlines():
             row = json.loads(line)
             if row["status"] == "completed" or not args.retry_errors:
                 seen.add(row["input_id"])
     config = read_config(args.config)
     client = create_client(config)
+    statuses = Counter()
     try:
-        with output.open("a", buffering=1) as log:
+        with output.open("a", buffering=1, encoding="utf-8") as log:
             for item in media:
                 case = cases[item["id"]]
                 condition = item["condition"]
@@ -77,7 +83,11 @@ def run(args):
                         h.update(chunk)
                 public = {k: case[k] for k in ("question", "options")}
                 identity = digest(
-                    {"qa": public, "media_sha256": h.hexdigest(), "config": config}
+                    {
+                        "qa": public,
+                        "media_sha256": h.hexdigest(),
+                        "config": configuration_identity(config),
+                    }
                 )
                 if identity in seen:
                     continue
@@ -91,22 +101,23 @@ def run(args):
                     "generation": config.get("generation", {}),
                 }
                 try:
-                    message, meta = client(
-                        [
-                            {
-                                "role": "user",
-                                "content": [
-                                    {"type": "text", "text": prompt(case)},
-                                    {
-                                        "type": "video_url",
-                                        "video_url": {"url": client.publish(path)},
-                                    },
-                                ],
-                            }
-                        ],
-                        tools=[],
-                        kind="benchmark",
-                    )
+                    with neutral_media(path) as video:
+                        message, meta = client(
+                            [
+                                {
+                                    "role": "user",
+                                    "content": [
+                                        {"type": "text", "text": prompt(case)},
+                                        {
+                                            "type": "video_url",
+                                            "video_url": {"url": client.publish(video)},
+                                        },
+                                    ],
+                                }
+                            ],
+                            tools=[],
+                            kind="benchmark",
+                        )
                     text = message.get("content")
                     status = (
                         "completed"
@@ -121,12 +132,17 @@ def run(args):
                     )
                 except Exception as error:
                     row.update(
-                        status="technical_error", error_type=type(error).__name__
+                        status="technical_error",
+                        error_type=type(error).__name__,
+                        error=str(error)[:500],
                     )
                 log.write(json.dumps(row, ensure_ascii=False) + "\n")
                 seen.add(identity)
+                statuses[row["status"]] += 1
     finally:
         client.close()
+    print(dict(statuses), file=sys.stderr)
+    return statuses
 
 
 def main():
@@ -134,7 +150,8 @@ def main():
     for name in ("specs", "media", "media-root", "config", "output"):
         p.add_argument("--" + name, required=True)
     p.add_argument("--retry-errors", action="store_true")
-    run(p.parse_args())
+    if run(p.parse_args())["technical_error"]:
+        raise SystemExit("Some inputs failed; rerun with --retry-errors")
 
 
 if __name__ == "__main__":

@@ -4,7 +4,10 @@ import base64
 import json
 import mimetypes
 import os
+import shutil
+import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -13,7 +16,7 @@ import httpx
 
 def read_config(path):
     """Load public settings; authentication is supplied through the environment."""
-    config = json.loads(Path(path).read_text())
+    config = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(config, dict):
         raise ValueError("Model configuration must be an object")
 
@@ -64,10 +67,34 @@ def read_config(path):
     return config
 
 
+# Settings that change how requests are sent, not what the model is asked.
+TRANSPORT_KEYS = ("timeout", "retries", "api_key_env")
+
+
+def configuration_identity(config):
+    return {k: v for k, v in config.items() if k not in TRANSPORT_KEYS}
+
+
+@contextmanager
+def neutral_media(path):
+    """Present a video as video.mp4; rendered file names carry the claim condition."""
+    path = Path(path)
+    with tempfile.TemporaryDirectory(dir=path.parent) as directory:
+        target = Path(directory) / ("video" + path.suffix)
+        try:
+            os.link(path, target)
+        except OSError:
+            shutil.copyfile(path, target)
+        yield target
+
+
 class Client:
     def __init__(self, config):
         self.config = config
         self.model = config["model"]
+        self.key_env = config.get("api_key_env", "MODEL_API_KEY")
+        if not os.environ.get(self.key_env):
+            raise ValueError(f"Set the API key in the {self.key_env} environment variable")
         self.http = httpx.Client(timeout=float(config.get("timeout", 7200)))
 
     def close(self):
@@ -82,7 +109,7 @@ class Client:
         )
 
     def __call__(self, messages, *, tools=None, kind=None, **unused):
-        token = os.environ[self.config.get("api_key_env", "MODEL_API_KEY")]
+        token = os.environ[self.key_env]
         body = {
             "model": self.model,
             "messages": messages,
@@ -108,7 +135,7 @@ class Client:
                 time.sleep(min(60, 2**attempt))
                 continue
             if (
-                response.status_code not in (401, 429, 500, 502, 503, 504)
+                response.status_code not in (429, 500, 502, 503, 504)
                 or attempt == retries
             ):
                 break
@@ -116,7 +143,7 @@ class Client:
             delay = float(retry_after) if retry_after.isdigit() else min(60, 2**attempt)
             time.sleep(delay)
         if response.status_code != 200:
-            raise RuntimeError(f"model_http_{response.status_code}")
+            raise RuntimeError(f"model_http_{response.status_code}: {response.text[:300]}")
         payload = response.json()
         choice = payload["choices"][0]
         return choice["message"], {

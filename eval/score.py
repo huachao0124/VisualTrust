@@ -5,7 +5,7 @@ import json
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from .client import load_client
+from .client import configuration_identity, create_client, read_config
 from .mapping_prompt import judge_prompt
 from .run import CONDITIONS, digest, read_specs
 
@@ -149,7 +149,8 @@ def bootstrap(rows, cases, replicates=5000, seed=1729):
         "accurate_claim_flip_rate",
         "misleading_claim_flip_rate",
     ]
-    if not source_ids or not np.any(counts[:, :, 0]):
+    included = [name for m, name in enumerate(names) if counts[m, :, 0].sum()]
+    if not source_ids or not included:
         return {}
     point = rates(counts.sum(axis=1))
     rng = np.random.default_rng(seed)
@@ -163,6 +164,8 @@ def bootstrap(rows, cases, replicates=5000, seed=1729):
     return {
         "unit": "source_video",
         "model_weighting": "equal",
+        "models": included,
+        "models_without_complete_cases": sorted(set(names) - set(included)),
         "replicates": replicates,
         "seed": seed,
         "metrics": {
@@ -178,68 +181,86 @@ def bootstrap(rows, cases, replicates=5000, seed=1729):
     }
 
 
+def map_rows(rows, cases, client, judge, cache, cache_log):
+    selected = {}
+    for row in rows:
+        case = cases[row["id"]]
+        if row["qa_sha256"] != digest({k: case[k] for k in ("question", "options")}):
+            raise ValueError("Response QA does not match the release")
+        key = (row["model"], row["id"], row["condition"])
+        if key in selected and selected[key]["input_id"] != row["input_id"]:
+            raise ValueError(
+                "Multiple input/configuration versions for one model/case/condition; score separate runs"
+            )
+        if key in selected and selected[key]["status"] == "mapped":
+            continue
+        result = {k: row[k] for k in ("id", "model", "condition", "input_id")}
+        if row["status"] != "completed":
+            result.update(status="unavailable")
+            selected[key] = result
+            continue
+        binding = digest(
+            {
+                "judge": judge,
+                "prompt": judge_prompt(case["question"], case["options"], row["response"]),
+            }
+        )
+        try:
+            if binding not in cache:
+                cache[binding] = map_response(client, case, row["response"])
+                entry = {"binding": binding, "mapping": cache[binding]}
+                cache_log.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            result.update(
+                status="mapped",
+                selected_option=cache[binding]["selected_option"],
+                mapping_id=binding,
+            )
+        except Exception as error:
+            result.update(
+                status="mapping_error",
+                error_type=type(error).__name__,
+                error=str(error)[:500],
+            )
+        selected[key] = result
+    return list(selected.values())
+
+
 def main():
     p = argparse.ArgumentParser()
     for name in ("specs", "responses", "config", "output"):
         p.add_argument("--" + name, required=True)
     args = p.parse_args()
     cases = read_specs(args.specs)
+    responses = [
+        json.loads(line)
+        for line in Path(args.responses).read_text(encoding="utf-8").splitlines()
+    ]
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
-    cache_path = out / "mapping_cache.json"
-    cache = json.loads(cache_path.read_text()) if cache_path.exists() else {}
-    client = load_client(args.config)
-    selected = {}
+    cache_path = out / "mapping_cache.jsonl"
+    cache = {}
+    if cache_path.exists():
+        for line in cache_path.read_text(encoding="utf-8").splitlines():
+            entry = json.loads(line)
+            cache[entry["binding"]] = entry["mapping"]
+    config = read_config(args.config)
+    client = create_client(config)
     try:
-        for line in Path(args.responses).read_text().splitlines():
-            row = json.loads(line)
-            case = cases[row["id"]]
-            if row["qa_sha256"] != digest(
-                {k: case[k] for k in ("question", "options")}
-            ):
-                raise ValueError("Response QA does not match the release")
-            key = (row["model"], row["id"], row["condition"])
-            if key in selected and selected[key]["input_id"] != row["input_id"]:
-                raise ValueError(
-                    "Multiple input/configuration versions for one model/case/condition; score separate runs"
-                )
-            if key in selected and selected[key]["status"] == "mapped":
-                continue
-            result = {k: row[k] for k in ("id", "model", "condition", "input_id")}
-            if row["status"] != "completed":
-                result.update(status="unavailable")
-                selected[key] = result
-                continue
-            binding = digest(
-                {
-                    "protocol": judge_prompt.__doc__ or "blind_mapping_v1",
-                    "prompt": judge_prompt(
-                        case["question"], case["options"], row["response"]
-                    ),
-                }
+        with cache_path.open("a", buffering=1, encoding="utf-8") as cache_log:
+            rows = map_rows(
+                responses, cases, client, configuration_identity(config), cache, cache_log
             )
-            try:
-                if binding not in cache:
-                    cache[binding] = map_response(client, case, row["response"])
-                    temp = out / "mapping_cache.tmp"
-                    temp.write_text(json.dumps(cache, ensure_ascii=False))
-                    temp.replace(cache_path)
-                result.update(
-                    status="mapped",
-                    selected_option=cache[binding]["selected_option"],
-                    mapping_id=binding,
-                )
-            except Exception as error:
-                result.update(status="mapping_error", error_type=type(error).__name__)
-            selected[key] = result
     finally:
         client.close()
-    rows = list(selected.values())
     (out / "scores.jsonl").write_text(
-        "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows)
+        "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8"
     )
-    (out / "metrics.json").write_text(json.dumps(summaries(rows, cases), indent=2))
-    (out / "aggregate.json").write_text(json.dumps(bootstrap(rows, cases), indent=2))
+    (out / "metrics.json").write_text(
+        json.dumps(summaries(rows, cases), indent=2), encoding="utf-8"
+    )
+    (out / "aggregate.json").write_text(
+        json.dumps(bootstrap(rows, cases), indent=2), encoding="utf-8"
+    )
 
 
 if __name__ == "__main__":
