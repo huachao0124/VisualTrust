@@ -480,7 +480,7 @@ def catalog_from_tracker(tracker, duration_s, material_id, source_sha256):
 def scan_frames(
     frames, read_ocr, *, material_id, source_sha256, duration_s, settings=None
 ):
-    """frames yields (source seconds, RGB); read_ocr is existing worker.read.
+    """frames yields (source seconds, RGB); read_ocr maps an RGB frame to OCR regions.
 
     OCR runs only on the fixed grid. Tracking failures and scene cuts wait
     for the next scheduled observation.
@@ -539,7 +539,7 @@ def scan_video(material, read_ocr, *, settings=None):
 
 
 class TrackedCatalogProvider:
-    """Lazy adapter for the agent; inject an existing OCR worker's read method."""
+    """Builds the OCR catalog on first use from an injected read_ocr callback."""
 
     def __init__(self, read_ocr, *, settings=None):
         self.read_ocr, self.settings = (read_ocr, settings)

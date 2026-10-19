@@ -87,7 +87,7 @@ class DEARAgent:
         return messages
 
     def direct_answer(self):
-        """Same terminal call as Direct; no record, verdict, OCR or new media."""
+        """No-conflict path: the reader receives the original video, without a report, OCR or new media."""
         self.guard()
         self.stage = "direct_answer"
         self.record(
@@ -251,7 +251,7 @@ class DEARAgent:
             )
         self.record(
             dict(
-                event="reused_conflict_report",
+                event="conflict_report",
                 report=self.evidence,
                 sha256=self.evidence_hash,
                 conflict=self.conflict,

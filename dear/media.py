@@ -19,7 +19,7 @@ def probe(path):
                 "json",
                 str(path),
             ],
-            text=True,
+            encoding="utf-8",
         )
     )
 

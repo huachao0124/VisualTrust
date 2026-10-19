@@ -470,7 +470,7 @@ class OverlapCatalog:
 
 
 class OverlapBlinder:
-    """Prevalidated model selection, executed by the existing full-video tool."""
+    """Validated selection, applied to the full video by the media transformer."""
 
     def __init__(self, media, catalog, material, exclude):
         self.media, self.catalog = (media, catalog)

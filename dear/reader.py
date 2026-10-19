@@ -63,7 +63,7 @@ class BlindAnswerFinished(BaseException):
 
 
 def reader_messages(qa, video_url, availability):
-    """The shared public input for Direct and terminal independent readings."""
+    """Reader input, shared by the no-conflict path and reading after selection."""
     return [
         {
             "role": "user",

@@ -1,11 +1,11 @@
-"""Portable entry point for the released DEAR controller and OCR tracker."""
+"""Command-line entry point for DEAR."""
 
 import argparse
 import copy
 import json
 from pathlib import Path
 
-from eval.client import load_client
+from eval.client import load_client, neutral_media
 from eval.run import read_specs
 
 from .agent import DEARAgent
@@ -77,9 +77,14 @@ class Media:
 def run_one(case, video, directory, client, read_ocr):
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=False)
+    with neutral_media(video) as published:
+        return run_published(case, video, client.publish(published), directory, client, read_ocr)
+
+
+def run_published(case, video, uri, directory, client, read_ocr):
     duration = float(probe(video)["format"]["duration"])
     qa = {k: case[k] for k in ("question", "options")}
-    workspace = Workspace(qa, video, client.publish(video), duration)
+    workspace = Workspace(qa, video, uri, duration)
 
     # Logs omit video URLs/data, file locations and authentication metadata.
     def redact(value):
@@ -96,7 +101,7 @@ def run_one(case, video, directory, client, read_ocr):
             return [redact(v) for v in value]
         return value
 
-    with (directory / "events.jsonl").open("x", buffering=1) as log:
+    with (directory / "events.jsonl").open("x", buffering=1, encoding="utf-8") as log:
 
         def record(event):
             log.write(json.dumps(redact(event), ensure_ascii=False) + "\n")
@@ -117,13 +122,14 @@ def run_one(case, video, directory, client, read_ocr):
                 "status": "technical_error",
                 "response": None,
                 "error_type": type(error).__name__,
+                "error": str(error)[:500],
             }
         if provider.catalog is not None:
             (directory / "ocr_catalog.json").write_text(
-                json.dumps(provider.catalog.value, ensure_ascii=False)
+                json.dumps(provider.catalog.value, ensure_ascii=False), encoding="utf-8"
             )
         (directory / "result.json").write_text(
-            json.dumps(redact(result), ensure_ascii=False, indent=2)
+            json.dumps(redact(result), ensure_ascii=False, indent=2), encoding="utf-8"
         )
     return result
 
