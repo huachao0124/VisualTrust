@@ -3,7 +3,7 @@
 Code and construction specifications for **VisualTrust: Video Reasoning under
 On-Screen Claim Framing**.
 
-[Download the release package](https://github.com/huachao0124/VisualTrust/releases/latest/download/VisualTrust.zip).
+[Paper](https://arxiv.org/abs/2610.21159) | [PDF](https://arxiv.org/pdf/2610.21159)
 
 ## Contents
 
@@ -33,6 +33,19 @@ are stable references, not licenses to redistribute the files. No font is
 silently substituted. A different font can change glyph shape and fit.
 
 ## Render
+
+Render every case in one dataset, including all three claim conditions:
+
+```sh
+python -m renderer.render --specs specs/Perception-Test.jsonl --dataset-root datasets --fonts local_fonts.json --output rendered/Perception-Test
+```
+
+Replace `Perception-Test` with `BOVText`, `VideoMME`, `VidOR`, or `MME-VideoOCR`
+to render another dataset. Each case has its own output directory, with a combined
+`media.jsonl` at the dataset output root. Case IDs are URL-encoded in directory names.
+Use a new output directory; existing videos are not overwritten.
+
+To render just one case, add `--id`:
 
 ```sh
 python -m renderer.render --specs specs/BOVText.jsonl \
@@ -113,3 +126,17 @@ The DEAR modules are `run` (entry point), `agent` (control flow), `detector`
 and exclusions), `ocr` (fixed-grid detection and tracking), `media` (masking),
 and `protocol` (shared prompts and tool validation). `eval/client.py` provides
 the configurable API interface; no service endpoint or credential is bundled.
+
+## Citation
+
+```bibtex
+@misc{zhu2026visualtrustvideoreasoningonscreen,
+      title={VisualTrust: Video Reasoning under On-Screen Claim Framing},
+      author={Huachao Zhu and Junjielong Xu and Sicheng Li and Liang Yang and Mingtao Chen and Zhichao Hu and Li Jiang and Pinjia He},
+      year={2026},
+      eprint={2610.21159},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2610.21159},
+}
+```
