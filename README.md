@@ -1,76 +1,106 @@
 # VisualTrust
 
-Code and construction specifications for **VisualTrust: Video Reasoning under
+Code and benchmark specifications for **VisualTrust: Video Reasoning under
 On-Screen Claim Framing**.
 
 [Paper](https://arxiv.org/abs/2610.21159) | [PDF](https://arxiv.org/pdf/2610.21159)
 
 ## Contents
 
-- `specs/`: the 5,063 released questions, options, correct/trap answers, paired claims, classes, and layouts.
-- `specs/sources.json`, `specs/subtitles.json`: dataset-relative source bindings and shared subtitle specifications.
-- `renderer/`: solid-background preparation and timed text rendering.
-- `eval/`: inference, blind response-to-option mapping, and paired summaries.
-- `dear/`: conflict investigation, evidence selection, OCR tracking, and independent reading.
+- `specs/`: the 5,063 benchmark cases, one JSON Lines file per source dataset.
+- `specs/sources.json`: the source video of each case, as a path relative to its dataset.
+- `specs/subtitles.json`: subtitle tracks shared by all three claim conditions of a case.
+- `renderer/`: renders the no-claim, accurate-claim, and misleading-claim videos.
+- `eval/`: inference, blind response-to-option mapping, and summary metrics.
+- `dear/`: evidence-consistency checking, evidence selection, OCR tracking, and the independent reader.
 
-No videos, font binaries, model weights, account configurations, experiment logs,
-or cluster-management code are included. Obtain the five source datasets under
-their respective terms. Place their contents beneath the following directories:
-`BOVText/`, `VideoMME/`, `Perception-Test/`, `VidOR/`, and `MME-VideoOCR/`.
-`VideoMME/data/` refers to the original Video-MME video directory.
+Videos and font files are not included.
+
+## Data
+
+Obtain BOVText, Video-MME, Perception Test, VidOR, and MME-VideoOCR under their
+respective terms. Place them under one dataset root in this layout, which the
+paths in `specs/sources.json` follow:
+
+```text
+datasets/
+  BOVText/{Train,Test}/Video/  and  BOVText/{Train,Test}/Annotation/
+  VideoMME/data/
+  Perception-Test/{train,valid}/videos/
+  VidOR/videos/video/
+  MME-VideoOCR/Video/
+```
+
+Each line of `specs/<dataset>.jsonl` is one case:
+
+| Field | Content |
+| --- | --- |
+| `id` | Case ID, `<source_id>-<n>` |
+| `source_id` | Source video, listed in `sources.json` |
+| `question`, `options` | The question and its lettered options |
+| `correct_answer` | The option supported by the video |
+| `trap_answer` | The option the misleading claim supports |
+| `claims` | The `accurate` and `misleading` claim texts |
+| `class` | Claim-fact class code, defined in Appendix B of the paper |
+| `canvas` | Frame size, frame rate, and duration of the source video |
+| `base` | `source` keeps the video unchanged; `solid_fill` covers the annotated creator title |
+| `rendering` | Timed claim-card drawing instructions for `accurate_claim` and `misleading_claim` |
+| `shared_subtitles` | Present when the case uses a subtitle track from `subtitles.json` |
 
 ## Setup
 
-Use Python 3.11+, FFmpeg with libx264, and ffprobe on `PATH`.
+Use Python 3.11+, FFmpeg 5.1+ with libx264, and ffprobe on `PATH`.
 
 ```sh
 python -m pip install -r requirements.txt
 ```
 
-Fonts are user-supplied. In a local copy of `renderer/fonts.json`, replace the
-required null entries with font filenames relative to that JSON file. Font IDs
-are stable references, not licenses to redistribute the files. No font is
-silently substituted. A different font can change glyph shape and fit.
+Fonts are user-supplied. Copy `renderer/fonts.json` and set each entry to a font
+file path relative to the copy. Rendering checks every required font before it
+starts and stops if one is missing. A `.ttc` collection uses its first face.
+A different font file can change glyph shapes and line fit.
 
 ## Render
 
 Render every case in one dataset, including all three claim conditions:
 
 ```sh
-python -m renderer.render --specs specs/Perception-Test.jsonl --dataset-root datasets --fonts local_fonts.json --output rendered/Perception-Test
+python -m renderer.render --specs specs/Perception-Test.jsonl --dataset-root datasets \
+  --fonts local_fonts.json --output rendered/Perception-Test
 ```
 
 Replace `Perception-Test` with `BOVText`, `VideoMME`, `VidOR`, or `MME-VideoOCR`
-to render another dataset. Each case has its own output directory, with a combined
-`media.jsonl` at the dataset output root. Case IDs are URL-encoded in directory names.
-Use a new output directory; existing videos are not overwritten.
-
-To render just one case, add `--id`:
+to render another dataset. To render one case, add `--id`:
 
 ```sh
 python -m renderer.render --specs specs/BOVText.jsonl \
-  --id BOVText:Cls10_Program_video11 --dataset-root datasets \
+  --id BOVText:Cls10_Program_video11-1 --dataset-root datasets \
   --fonts local_fonts.json --output rendered/example
 ```
 
-Outputs are `no_claim.mp4`, `accurate_claim.mp4`, `misleading_claim.mp4`, and a
-relative-path `media.jsonl` manifest. `--preview` produces transparent claim
-layers without source video. Source files are never modified.
+Each case produces `no_claim.mp4`, `accurate_claim.mp4`, and `misleading_claim.mp4`.
+A dataset-wide run puts each case in a directory named by its URL-encoded case ID.
+`media.jsonl` at the output root lists every video by relative path.
+The renderer refuses to overwrite existing outputs and never modifies source files.
+`--preview` writes the claim cards as transparent PNGs and needs no source video.
 
-The public base uses solid fills for the selected original-title regions,
-shared across conditions. Claim specs contain timed drawing instructions with
-text, font identifiers, positions, colors, shadows, and transforms already
-resolved. The renderer executes those instructions without selecting line breaks
-or fitting text. No extraction service or old renderer is required.
-Solid fills and local font choices mean these renders are not asserted to be
-byte-identical to evaluated media.
+A source video must match its spec's frame size and lie within 0.25 s of its
+duration. Claim cards follow drawing instructions in which text, fonts, positions,
+colors, shadows, and transforms are already resolved, so claim text is never
+rewrapped. Shared subtitle cues are wrapped with the configured font, and a cue
+that does not fit its region stops rendering.
 
-## Evaluate And Score
+For the 246 BOVText cases with a creator title, the paper's claim-blinded base
+repairs the title region with the video inpainting model UnderEraser. The released
+base fills that region with a solid color instead. Renders of these cases, and
+renders made with substitute fonts, therefore differ from the evaluated videos.
 
-Create model and judge configs from `eval/model_config.example.json`. Configure the
-endpoint and model, and keep the actual key in the named environment variable.
-Set the model's sampling and thinking settings explicitly in `generation`.
-The runner does not impose an output-token cap.
+## Evaluate and Score
+
+Create model and judge configs from `eval/model_config.example.json`. Set the
+endpoint and model, and keep the API key in the environment variable named by
+`api_key_env`. Set the model's sampling and thinking settings explicitly in
+`generation`. The runner imposes no output-token cap.
 
 ```sh
 python -m eval.run --specs specs --media rendered/example/media.jsonl \
@@ -79,53 +109,63 @@ python -m eval.score --specs specs --responses responses.jsonl \
   --config judge.json --output scores
 ```
 
-The default client uses Chat Completions with video bytes. For native video or
-File APIs, set `adapter` to a locally installed `module:factory`. The returned
-client implements `publish(path)`, `close()`, and a callable accepting messages,
-tools, and request kind. It returns an assistant message plus `finish_reason`,
-model and usage metadata. No internal provider gateway is needed.
+The default client sends video bytes through Chat Completions. For native video
+or file-upload APIs, set `adapter` to a locally installed `module:factory`. The
+factory receives the config and returns a client with three parts:
 
-Completed inference inputs are reused by QA, video-content and configuration
-identity. `--retry-errors` retries unresolved inputs without replaying successes.
-Scoring deduplicates identical mapping prompts and sends only question, options,
-and final response to the mapper, never the correct/trap answers or condition.
-Mapped outputs must be a listed option or `ambiguous`. Ambiguous is incorrect;
-technical/incomplete responses remain unavailable. Summaries use complete
-three-condition cases. Trap-flip denominators contain no-claim-correct cases.
-Overall aggregates weight models equally using unrounded values. Confidence
-intervals resample source-video clusters with 5,000 shared bootstrap draws.
+- `publish(path)` returns the URL placed in the request. The file is named `video.mp4` and exists until the model call returns.
+- `close()` releases resources.
+- Calling the client with `messages`, `tools`, `kind`, and possibly further keyword arguments returns an assistant message and metadata with `finish_reason`, `model`, and `usage`.
+
+Inference and scoring follow these rules:
+
+- A rerun skips inputs already answered for the same question, video content, and model configuration. `timeout`, `retries`, and `api_key_env` do not count as configuration.
+- `--retry-errors` retries inputs whose last attempt failed or ended incomplete. The runner exits with an error status if any input fails.
+- The mapper receives only the question, options, and final response. It never receives the correct answer, the trap answer, or the claim condition.
+- Identical mapping prompts are sent once per judge configuration and cached in `scores/mapping_cache.jsonl`.
+- Each response maps to a listed option or `ambiguous`. Ambiguous responses count as incorrect.
+- Summaries use complete three-condition cases, so a case with a failed or incomplete response is excluded.
+- The trap-flip rate's denominator is the cases answered correctly with no claim.
+- `aggregate.json` weights its listed models equally, using unrounded per-model values. Its 95% intervals resample source videos with 5,000 bootstrap draws shared across models.
 
 ## DEAR
 
-Install PaddleOCR 2.x and the corresponding PaddlePaddle CPU or GPU runtime for
-your platform. The default command uses CPU OCR; `--ocr-device gpu` opts in to
-GPU. OCR runs on a fixed 2 FPS grid. Optical flow tracks regions between those
-observations; tracking failures and scene cuts do not trigger extra OCR calls.
+Install PaddleOCR 2.x and the PaddlePaddle CPU or GPU runtime for your platform.
+OCR runs on the CPU unless `--ocr-device gpu` is given.
 
 ```sh
-python -m dear.run --specs specs --id BOVText:Cls10_Program_video11 \
+python -m dear.run --specs specs --id BOVText:Cls10_Program_video11-1 \
   --video rendered/example/misleading_claim.mp4 --config model.json \
   --output dear_output
 ```
 
-The detector sees video and question, without options or an earlier response.
-The selector sees the report, video and original QA. Text is selected by
-queried OCR track ID; other visual regions/intervals and the whole audio track
-may also be withheld. Both branches invoke one fresh reader: unchanged media
-when no conflict is reported, otherwise the selected derived media. The reader
-receives neither the report, OCR text, selection rationale nor previous replies.
-There is no post-reader arbitration. The portable media adapter uses FFmpeg
-encoding while retaining duration; server upload and deployment code is excluded.
+DEAR proceeds as follows:
 
-For programmatic use, `dear.run.run_one` accepts an injected model client and
-OCR callback. This supports a different OCR installation without changing the
-controller. Each call returns status separately from response correctness.
+- An independent subagent checks the video against the question, without the options or an earlier response, and reports conflicting accounts.
+- If no conflict is reported, the reader receives the original video.
+- Otherwise, the selector weighs the reported accounts against the video, question, and options. It locates on-screen text by querying OCR tracks.
+- The selector can withhold text tracks, other visual regions or intervals, and the whole audio track. Withheld content is masked or removed with the video's duration unchanged.
+- The reader answers in a fresh context from the resulting video and the original question and options. It receives none of the conflict report, OCR text, selection rationale, or earlier responses, and its response is the final answer.
+
+The selector may query OCR several times before it selects. A query that repeats
+without new results ends the run. PaddleOCR runs on a fixed grid of 2 frames per
+second, and optical flow tracks text regions between OCR frames.
+
+`dear_output/result.json` holds the final response and its execution status.
+`events.jsonl` logs each step without video data or file paths.
+For programmatic use, `dear.run.run_one` accepts an injected model client and OCR
+callback, so a different OCR installation needs no change to the controller.
 
 The DEAR modules are `run` (entry point), `agent` (control flow), `detector`
-(consistency check), `reader` (isolated final response), `selection` (OCR queries
+(consistency check), `reader` (independent reading), `selection` (OCR queries
 and exclusions), `ocr` (fixed-grid detection and tracking), `media` (masking),
-and `protocol` (shared prompts and tool validation). `eval/client.py` provides
-the configurable API interface; no service endpoint or credential is bundled.
+and `protocol` (shared prompts and tool validation).
+
+## License
+
+The code is released under the MIT License. The specifications in `specs/` are
+released under CC BY-NC 4.0 (`specs/LICENSE`). Content taken from the source
+datasets remains subject to their terms.
 
 ## Citation
 
