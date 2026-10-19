@@ -1,0 +1,8 @@
+{
+  "base_url": "<CHAT_COMPLETIONS_API_BASE>",
+  "model": "<MODEL_NAME>",
+  "api_key_env": "MODEL_API_KEY",
+  "timeout": 7200,
+  "retries": 6,
+  "generation": {}
+}
