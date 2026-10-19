@@ -1,9 +1,10 @@
-"""Render exported claim layouts using locally supplied dataset videos."""
+"""Render claim layouts onto locally supplied dataset videos."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import subprocess
 import tempfile
 from collections import defaultdict
@@ -12,13 +13,10 @@ from urllib.parse import quote
 
 from PIL import Image
 
-try:
-    from . import drawing, subtitles
-except ImportError:
-    import drawing
-    import subtitles
+from . import drawing, subtitles
 
 DATASETS = {"BOVText", "VideoMME", "Perception-Test", "VidOR", "MME-VideoOCR"}
+CONDITIONS = ("no_claim", "accurate_claim", "misleading_claim")
 
 
 def dataset_path(root, relative):
@@ -40,7 +38,7 @@ def dataset_path(root, relative):
 def cards(spec, condition):
     layout = spec["rendering"]
     if layout["kind"] != "drawing_program":
-        raise ValueError("Use the compiled release specifications")
+        raise ValueError(f"Unsupported rendering kind: {layout['kind']}")
     for episode in layout["episodes"]:
         image = drawing.paint(episode[condition])
         yield episode["start_s"], episode["end_s"], image
@@ -50,7 +48,7 @@ def solid_filters(spec, root):
     base = spec["base"]
     if base["mode"] == "source":
         return []
-    annotation = json.loads(dataset_path(root, base["annotation"]).read_text())
+    annotation = json.loads(dataset_path(root, base["annotation"]).read_text(encoding="utf-8"))
     filters = []
     # Group identical title rectangles across consecutive annotated frames.
     runs = {}
@@ -59,15 +57,12 @@ def solid_filters(spec, root):
         index = int(frame) - 1
         active = set()
         for obj in objects:
-            if "target_ids" in base:
-                if str(obj["ID"]) not in base["target_ids"]:
-                    continue
-            elif obj.get("category") != base["category"]:
+            if str(obj["ID"]) not in base["target_ids"]:
                 continue
             points = obj["points"]
             xs = points[::2]
             ys = points[1::2]
-            box = (int(min(xs)), int(min(ys)), math_ceil(max(xs)), math_ceil(max(ys)))
+            box = (int(min(xs)), int(min(ys)), math.ceil(max(xs)), math.ceil(max(ys)))
             key = (str(obj["ID"]), box)
             active.add(key)
             if key in runs and runs[key][1] == index - 1:
@@ -88,12 +83,6 @@ def solid_filters(spec, root):
     return filters
 
 
-def math_ceil(x):
-    import math
-
-    return math.ceil(x)
-
-
 def subtitle_cards(spec, subtitle_specs):
     if not spec.get("shared_subtitles"):
         return
@@ -108,12 +97,34 @@ def subtitle_cards(spec, subtitle_specs):
             layer.get("subtitle_layout")
             or track["appearance"]["subtitle_track_layout"]["tracks"][0]
         )
-        painted = subtitles.render_cue_overlay(
-            cues[layer["cue_id"]], look, layout, {}, canvas, fingerprint=False
-        )
+        painted = subtitles.render_cue_overlay(cues[layer["cue_id"]], look, layout, canvas)
         image = Image.new("RGBA", tuple(canvas))
         image.alpha_composite(painted["image"], tuple(painted["position_px"]))
         yield layer["start_s"], layer["end_s"], image
+
+
+def required_fonts(spec, subtitle_specs):
+    fonts = set()
+    for episode in spec["rendering"]["episodes"]:
+        for condition in CONDITIONS[1:]:
+            for op in episode[condition]["ops"]:
+                if "font" in op.get("kwargs", {}):
+                    fonts.add(op["kwargs"]["font"][0])
+    if spec.get("shared_subtitles") and subtitle_specs is not None:
+        track = subtitle_specs[spec["source_id"]]
+        fonts.add(track["appearance"]["subtitle_look_spec"]["font_asset_id"])
+        for layer in track["layers"]:
+            if layer.get("subtitle_look_spec"):
+                fonts.add(layer["subtitle_look_spec"]["font_asset_id"])
+    return fonts
+
+
+def check_fonts(specs, subtitle_specs=None):
+    missing = set()
+    for spec in specs:
+        missing |= required_fonts(spec, subtitle_specs) - set(drawing.FONTS)
+    if missing:
+        raise ValueError("Set these fonts in --fonts: " + ", ".join(sorted(missing)))
 
 
 def timeline(layers, canvas, duration, directory):
@@ -169,7 +180,7 @@ def render(spec, source, dataset_root, output, ffmpeg, subtitle_specs=None):
                 "json",
                 str(source),
             ],
-            text=True,
+            encoding="utf-8",
         )
     )
     videos = [s for s in probe["streams"] if s["codec_type"] == "video"]
@@ -181,27 +192,23 @@ def render(spec, source, dataset_root, output, ffmpeg, subtitle_specs=None):
     if abs(float(probe["format"]["duration"]) - spec["canvas"]["duration_s"]) > 0.25:
         raise ValueError("Source video duration differs from the rendering spec")
     output.mkdir(parents=True, exist_ok=True)
-    for name in ["no_claim", "accurate_claim", "misleading_claim"]:
+    for name in CONDITIONS:
         if (output / (name + ".mp4")).exists():
             raise FileExistsError("Output already exists")
     fills = solid_filters(spec, dataset_root)
     with tempfile.TemporaryDirectory() as temp:
-        for condition, name in [
-            ("A", "no_claim"),
-            ("C", "accurate_claim"),
-            ("D", "misleading_claim"),
-        ]:
+        for name in CONDITIONS:
 
             def layers():
                 yield from subtitle_cards(spec, subtitle_specs or {})
-                if condition != "A":
-                    yield from cards(spec, condition)
+                if name != "no_claim":
+                    yield from cards(spec, name)
 
             overlay = timeline(
                 layers(),
                 (spec["canvas"]["width"], spec["canvas"]["height"]),
                 spec["canvas"]["duration_s"],
-                Path(temp) / condition,
+                Path(temp) / name,
             )
             command = [
                 ffmpeg,
@@ -221,7 +228,7 @@ def render(spec, source, dataset_root, output, ffmpeg, subtitle_specs=None):
                 graph.append("[0:v]" + ",".join(fills) + "[base]")
                 label = "base"
             if overlay:
-                graph.append(f"[{label}][1:v]overlay=shortest=1[layer]")
+                graph.append(f"[{label}][1:v]overlay=eof_action=pass[layer]")
                 label = "layer"
             if graph:
                 script = Path(temp) / "filter.txt"
@@ -268,13 +275,13 @@ def main():
     parser.add_argument("--preview", action="store_true")
     parser.add_argument("--ffmpeg", default="ffmpeg")
     args = parser.parse_args()
-    mapping = json.loads(args.fonts.read_text())
+    mapping = json.loads(args.fonts.read_text(encoding="utf-8"))
     drawing.FONTS = {
         key: args.fonts.parent / relative
         for key, relative in mapping.items()
         if relative
     }
-    with args.specs.open() as handle:
+    with args.specs.open(encoding="utf-8") as handle:
         specs = [json.loads(line) for line in handle if line.strip()]
     if args.id is not None:
         specs = [spec for spec in specs if spec["id"] == args.id]
@@ -287,9 +294,10 @@ def main():
         raise ValueError("Duplicate case IDs")
     outputs = [args.output if args.id is not None else args.output / quote(value, safe="") for value in ids]
     if args.preview:
+        check_fonts(specs)
         for spec, output in zip(specs, outputs):
             output.mkdir(parents=True, exist_ok=True)
-            for condition in ["C", "D"]:
+            for condition in CONDITIONS[1:]:
                 for i, (_, _, image) in enumerate(cards(spec, condition)):
                     image.save(output / f"{condition}_{i}.png")
                     image.close()
@@ -297,31 +305,31 @@ def main():
     if args.dataset_root is None:
         parser.error("--dataset-root is required for video rendering")
     data_root = args.specs.resolve().parent
-    sources = {s["id"]: s for s in json.loads((data_root / "sources.json").read_text())}
+    sources = {s["id"]: s for s in json.loads((data_root / "sources.json").read_text(encoding="utf-8"))}
     paths = []
     for spec, output in zip(specs, outputs):
         source = sources[spec["source_id"]]
         path = dataset_path(args.dataset_root, source["path"])
         if not path.is_file():
             raise FileNotFoundError(source["path"])
-        if any((output / (condition + ".mp4")).exists()
-               for condition in ["no_claim", "accurate_claim", "misleading_claim"]):
+        if any((output / (condition + ".mp4")).exists() for condition in CONDITIONS):
             raise FileExistsError(f"Output already exists: {output}")
         paths.append(path)
     if (args.output / "media.jsonl").exists():
         raise FileExistsError("Output manifest already exists")
     shared = {
         s["source_id"]: s
-        for s in json.loads((data_root / "subtitles.json").read_text())
+        for s in json.loads((data_root / "subtitles.json").read_text(encoding="utf-8"))
     }
+    check_fonts(specs, shared)
     args.output.mkdir(parents=True, exist_ok=True)
-    with (args.output / "media.jsonl").open("x") as manifest:
+    with (args.output / "media.jsonl").open("x", encoding="utf-8") as manifest:
         for index, (spec, path, output) in enumerate(zip(specs, paths, outputs), 1):
             render(spec, path, args.dataset_root, output, args.ffmpeg, shared)
             records = [
                 {"id": spec["id"], "condition": c,
                  "path": (output / (c + ".mp4")).relative_to(args.output).as_posix()}
-                for c in ["no_claim", "accurate_claim", "misleading_claim"]
+                for c in CONDITIONS
             ]
             manifest.write("".join(json.dumps(row) + "\n" for row in records))
             manifest.flush()

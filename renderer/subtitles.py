@@ -1,7 +1,5 @@
 """Render the shared subtitle specifications."""
 
-import hashlib
-import json
 import math
 import unicodedata
 
@@ -10,7 +8,6 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont
 from . import drawing
 
 SUPERSAMPLE = 3
-RenderError = ValueError
 CONTEXTUAL_SHAPING_RANGES = (
     (1424, 2303),
     (2304, 3839),
@@ -26,7 +23,7 @@ CONTEXTUAL_SHAPING_RANGES = (
 def parse_color(value: str, opacity: float = 1.0) -> tuple[int, int, int, int]:
     raw = value.lstrip("#")
     if len(raw) not in (6, 8):
-        raise RenderError(f"invalid_color:{value}")
+        raise ValueError(f"invalid_color:{value}")
     rgb = tuple((int(raw[index : index + 2], 16) for index in (0, 2, 4)))
     embedded = int(raw[6:8], 16) / 255 if len(raw) == 8 else 1.0
     alpha = max(0, min(255, round(255 * embedded * opacity)))
@@ -64,9 +61,9 @@ def _validate_contextual_layout(
     if not requires_contextual_shaping(text):
         return None
     if abs(spacing) > 1e-09:
-        raise RenderError("contextual_shaping_requires_zero_letter_spacing")
+        raise ValueError("contextual_shaping_requires_zero_letter_spacing")
     if getattr(font, "layout_engine", None) != ImageFont.Layout.RAQM:
-        raise RenderError("contextual_shaping_requires_raqm")
+        raise ValueError("contextual_shaping_requires_raqm")
     return text_direction(text)
 
 
@@ -106,7 +103,7 @@ def split_long_token(
 ) -> list[str]:
     """Wrap a no-space token without splitting a basic grapheme cluster."""
     if requires_contextual_shaping(token):
-        raise RenderError(f"contextual_token_exceeds_bbox:{token}")
+        raise ValueError(f"contextual_token_exceeds_bbox:{token}")
     clusters = text_clusters(token)
     if not clusters:
         return [""]
@@ -120,7 +117,7 @@ def split_long_token(
         else:
             current = candidate
         if text_width(font, current, spacing) > width:
-            raise RenderError(f"cluster_exceeds_bbox:{cluster}")
+            raise ValueError(f"cluster_exceeds_bbox:{cluster}")
     if current:
         parts.append(current)
     return parts
@@ -164,7 +161,7 @@ def wrap_text(
     for paragraph in text.splitlines() or [text]:
         lines.extend(wrap_paragraph(font, paragraph, width, spacing))
     if len(lines) > max_lines:
-        raise RenderError(f"text_exceeds_max_lines:{len(lines)}>{max_lines}:{text}")
+        raise ValueError(f"text_exceeds_max_lines:{len(lines)}>{max_lines}:{text}")
     return lines
 
 
@@ -186,13 +183,6 @@ def draw_spaced_text(
     for char in text:
         draw.text((x, y), char, font=font, **kwargs)
         x += glyph_advance(font, char) + spacing
-
-
-ProductionRenderError = ValueError
-
-
-def canonical_bytes(value):
-    return json.dumps(value, sort_keys=True).encode()
 
 
 def _overlay_region(
@@ -217,16 +207,13 @@ def render_cue_overlay(
     cue: dict,
     look: dict,
     layout: dict,
-    font_assets: dict,
     canvas: list[int],
-    *,
-    fingerprint: bool = True,
 ) -> dict:
     """Render a shared subtitle cue into a tightly cropped RGBA image."""
     scale = int(SUPERSAMPLE)
     left, top, right, bottom = _overlay_region(canvas, layout, look)
     if left >= right or top >= bottom:
-        raise ProductionRenderError(f"overlay_region_empty:{cue['cue_id']}")
+        raise ValueError(f"overlay_region_empty:{cue['cue_id']}")
     high = Image.new(
         "RGBA", ((right - left) * scale, (bottom - top) * scale), (0, 0, 0, 0)
     )
@@ -249,10 +236,10 @@ def render_cue_overlay(
     line_height = ascent + descent
     total_height = line_height * len(lines) + line_spacing * max(0, len(lines) - 1)
     if total_height > box[3] - box[1]:
-        raise ProductionRenderError(f"cue_height_overflow:{cue['cue_id']}")
+        raise ValueError(f"cue_height_overflow:{cue['cue_id']}")
     widths = [text_width(font, line, spacing) for line in lines]
     if any((width > box[2] - box[0] + 0.5 for width in widths)):
-        raise ProductionRenderError(f"cue_width_overflow:{cue['cue_id']}")
+        raise ValueError(f"cue_width_overflow:{cue['cue_id']}")
     text_top = box[1] + (box[3] - box[1] - total_height) / 2
     positions = []
     for index, width in enumerate(widths):
@@ -335,7 +322,7 @@ def render_cue_overlay(
     image = high.resize((right - left, bottom - top), Image.Resampling.LANCZOS)
     painted = image.getchannel("A").getbbox()
     if painted is None:
-        raise ProductionRenderError(f"cue_overlay_empty:{cue['cue_id']}")
+        raise ValueError(f"cue_overlay_empty:{cue['cue_id']}")
     if (
         left > 0
         and painted[0] == 0
@@ -343,7 +330,7 @@ def render_cue_overlay(
         or (right < canvas[0] and painted[2] == image.width)
         or (bottom < canvas[1] and painted[3] == image.height)
     ):
-        raise ProductionRenderError(f"cue_overlay_region_clipped:{cue['cue_id']}")
+        raise ValueError(f"cue_overlay_region_clipped:{cue['cue_id']}")
     cropped = image.crop(painted)
     absolute = [
         left + painted[0],
@@ -351,18 +338,9 @@ def render_cue_overlay(
         left + painted[2],
         top + painted[3],
     ]
-    raw_hash = (
-        hashlib.sha256(
-            canonical_bytes({"size": list(cropped.size), "mode": cropped.mode})
-            + cropped.tobytes()
-        ).hexdigest()
-        if fingerprint
-        else None
-    )
     return {
         "image": cropped,
         "position_px": [absolute[0], absolute[1]],
         "painted_bbox_px": absolute,
-        "rgba_sha256": raw_hash,
         "lines": lines,
     }
